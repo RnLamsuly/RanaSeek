@@ -2,6 +2,7 @@ package com.ranaseek.app.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -29,9 +31,13 @@ import com.ranaseek.app.ui.theme.RsTheme
 private sealed interface MdSegment {
     data class Code(val code: String, val lang: String) : MdSegment
     data class Plain(val lines: List<String>) : MdSegment
+    data class Quote(val lines: List<String>) : MdSegment
+    data class Latex(val code: String) : MdSegment
+    data class LatexLine(val line: String) : MdSegment
+    data object Divider : MdSegment
 }
 
-/** 极简 Markdown：代码块、标题、列表、粗体、行内代码。够对话用，不引入重量级依赖。 */
+/** 极简 Markdown：代码块、标题、列表、粗体、行内代码、引用、分割线、LaTeX 公式。 */
 @Composable
 fun MarkdownText(
     text: String,
@@ -92,6 +98,67 @@ fun MarkdownText(
                     }
                 }
 
+                is MdSegment.Quote -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(3.dp)
+                                .height(
+                                    // 用最小高度占位，竖线随内容由外层 Row 拉伸不便，这里用固定近似
+                                    (seg.lines.size * 22).dp.coerceAtLeast(18.dp)
+                                )
+                                .background(p.divider, RoundedCornerShape(2.dp))
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            seg.lines.forEach { qLine ->
+                                if (qLine.isBlank()) {
+                                    Spacer(Modifier.height(6.dp))
+                                } else {
+                                    Text(
+                                        buildInline(qLine, p.textSecondary, codeBg),
+                                        color = p.textSecondary,
+                                        fontSize = fontSize,
+                                        lineHeight = lineHeight
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                is MdSegment.Latex -> {
+                    LatexView(
+                        text = seg.code,
+                        displayMode = true,
+                        textColor = textColor.toArgb(),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+
+                is MdSegment.LatexLine -> {
+                    LatexView(
+                        text = seg.line,
+                        displayMode = false,
+                        textColor = textColor.toArgb(),
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+                }
+
+                is MdSegment.Divider -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp)
+                            .height(1.dp)
+                            .background(p.divider)
+                    )
+                }
+
                 is MdSegment.Plain -> {
                     seg.lines.forEach { raw ->
                         val line = raw.trimEnd()
@@ -150,6 +217,10 @@ private fun splitSegments(text: String): List<MdSegment> {
     var inCode = false
     var codeLang = ""
     val code = StringBuilder()
+    var inQuote = false
+    val quoteLines = mutableListOf<String>()
+    var inLatex = false
+    val latexCode = StringBuilder()
 
     fun flushPlain() {
         if (plain.isNotEmpty()) {
@@ -158,37 +229,103 @@ private fun splitSegments(text: String): List<MdSegment> {
         }
     }
 
+    fun flushQuote() {
+        if (quoteLines.isNotEmpty()) {
+            segments += MdSegment.Quote(quoteLines.toList())
+            quoteLines.clear()
+        }
+    }
+
     lines.forEach { line ->
         val trimmed = line.trimStart()
-        if (trimmed.startsWith("```")) {
-            if (inCode) {
-                // 结束代码块
-                segments += MdSegment.Code(code.toString().trimEnd('\n'), codeLang)
-                code.clear()
-                codeLang = ""
-                inCode = false
-            } else {
-                flushPlain()
-                inCode = true
-                codeLang = trimmed.removePrefix("```").trim()
+        val compact = trimmed.replace(" ", "")
+
+        when {
+            // 代码块围栏
+            trimmed.startsWith("```") -> {
+                if (inCode) {
+                    segments += MdSegment.Code(code.toString().trimEnd('\n'), codeLang)
+                    code.clear()
+                    codeLang = ""
+                    inCode = false
+                } else {
+                    flushPlain()
+                    flushQuote()
+                    inCode = true
+                    codeLang = trimmed.removePrefix("```").trim()
+                }
             }
-        } else if (inCode) {
-            code.appendLine(line)
-        } else {
-            plain += line
+            inCode -> code.appendLine(line)
+
+            // 块级公式（$$...$$）
+            inLatex -> {
+                if (trimmed.endsWith("$$")) {
+                    val content = trimmed.removeSuffix("$$").trim()
+                    if (content.isNotBlank()) latexCode.appendLine(content)
+                    segments += MdSegment.Latex(latexCode.toString().trim())
+                    latexCode.clear()
+                    inLatex = false
+                } else {
+                    latexCode.appendLine(line)
+                }
+            }
+            trimmed.startsWith("$$") -> {
+                flushPlain()
+                flushQuote()
+                val rest = trimmed.removePrefix("$$").trim()
+                if (rest.endsWith("$$") && rest.length >= 2) {
+                    // 单行 $$...$$
+                    segments += MdSegment.Latex(rest.removeSuffix("$$").trim())
+                } else {
+                    inLatex = true
+                    if (rest.isNotBlank()) latexCode.appendLine(rest)
+                }
+            }
+
+            // 引用块（> 开头，连续多行合并）
+            trimmed.startsWith(">") -> {
+                flushPlain()
+                inQuote = true
+                quoteLines += trimmed.removePrefix(">").trimStart()
+            }
+
+            // 分割线（--- / *** / ___，允许空格）
+            compact.length >= 3 &&
+                (compact.all { it == '-' } || compact.all { it == '*' } || compact.all { it == '_' }) -> {
+                flushPlain()
+                flushQuote()
+                segments += MdSegment.Divider
+            }
+
+            // 含行内公式 $...$ 的行
+            Regex("\\$[^$\\n]+\\$").containsMatchIn(trimmed) -> {
+                flushPlain()
+                flushQuote()
+                segments += MdSegment.LatexLine(trimmed)
+            }
+
+            else -> {
+                inQuote = false
+                flushQuote()
+                plain += line
+            }
         }
     }
     if (inCode && code.isNotEmpty()) {
         segments += MdSegment.Code(code.toString().trimEnd('\n'), codeLang)
     }
+    if (inLatex && latexCode.isNotEmpty()) {
+        segments += MdSegment.Latex(latexCode.toString().trim())
+    }
+    flushQuote()
     flushPlain()
     return segments
 }
 
-/** 行内解析：**粗体**、`代码`。 */
+/** 行内解析：**粗体**、~~删除线~~、`代码`。 */
 private fun buildInline(text: String, textColor: Color, codeBg: Color): AnnotatedString {
     return buildAnnotatedString {
-        val regex = Regex("(\\*\\*[^*]+\\*\\*|`[^`]+`)")
+        val regex = Regex("(\\*\\*[^*]+\\*\\*|~~[^~]+~~|`[^`]+`)")
         var last = 0
         regex.findAll(text).forEach { m ->
             if (m.range.first > last) append(text.substring(last, m.range.first))
@@ -196,6 +333,11 @@ private fun buildInline(text: String, textColor: Color, codeBg: Color): Annotate
             when {
                 token.startsWith("**") -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                     append(token.removePrefix("**").removeSuffix("**"))
+                }
+                token.startsWith("~~") -> withStyle(
+                    SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)
+                ) {
+                    append(token.removePrefix("~~").removeSuffix("~~"))
                 }
                 token.startsWith("`") -> withStyle(
                     SpanStyle(
