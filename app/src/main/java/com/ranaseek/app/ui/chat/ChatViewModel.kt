@@ -287,7 +287,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
-            if (code != 200 && !_state.value.messages.lastOrNull()?.error.isNullOrBlank()) {
+            if (code != 200) {
+                // HTTP 错误（401 鉴权失败 / 429 限流 / 5xx 等）直接显示具体原因，
+                // 不要当成「网络异常」，避免误导
                 finishWithError(ChatRepository.httpErrorMessage(code, null), assistantMsg.id)
             } else if (_state.value.messages.lastOrNull()?.streaming == true) {
                 finishStreaming(assistantMsg.id, incomplete = true)
